@@ -1,0 +1,16 @@
+{
+  "name": "복권 수첩",
+  "short_name": "복권수첩",
+  "description": "로또 6/45 · 연금복권 720+ 자동 구매 현황, 알림, 내역, 수익률",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F2F4F7",
+  "theme_color": "#1F3FA8",
+  "lang": "ko",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
