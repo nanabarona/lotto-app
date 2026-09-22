@@ -229,7 +229,27 @@ nav.tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; background: var(--surface); border-top: 1px solid var(--line);
   padding: 6px 8px calc(env(safe-area-inset-bottom, 0px) + 6px);
 }
-nav.tabs .in { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); }
+nav.tabs .in { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(4, 1fr); }
+.bell { position: relative; }
+.bell .badge { top: -5px; left: auto; right: -5px; }
+
+/* 설정 · 하위 화면 */
+.sub-head { display: flex; align-items: center; gap: 10px; }
+.sub-head h1 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+.sub-head .icon-btn svg { stroke-width: 2.4; }
+.admin-badge { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--accent); background: var(--accent-soft); padding: 3px 8px; border-radius: 999px; vertical-align: middle; }
+.card.admin { border-style: dashed; }
+.menu { display: grid; }
+.menu-row {
+  appearance: none; background: none; border: 0; border-top: 1px solid var(--line); padding: 12px 0; width: 100%;
+  display: grid; grid-template-columns: 1fr 12px; gap: 10px; align-items: center; text-align: left; cursor: pointer;
+}
+.menu-row:first-child { border-top: 0; }
+.menu-row b { display: block; font-weight: 600; }
+.menu-row small { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.menu-row .chev { width: 8px; height: 8px; border-right: 2px solid var(--muted); border-top: 2px solid var(--muted); transform: rotate(45deg); }
+.menu-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.row > .d { text-align: right; }
 .tab { background: none; border: 0; padding: 6px 0 4px; display: grid; justify-items: center; gap: 2px; font-size: 11px; font-weight: 600; color: var(--muted); cursor: pointer; position: relative; }
 .tab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .tab[aria-selected="true"] { color: var(--accent); }
@@ -263,8 +283,9 @@ nav.tabs .in { max-width: 560px; margin: 0 auto; display: grid; grid-template-co
     <button class="icon-btn" id="btn-refresh" aria-label="새로고침">
       <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
     </button>
-    <button class="icon-btn" id="btn-settings" aria-label="설정">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    <button class="icon-btn bell" id="btn-bell" aria-label="알림">
+      <svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>
+      <span class="badge" id="badge" hidden></span>
     </button>
   </div>
 </header>
@@ -275,10 +296,9 @@ nav.tabs .in { max-width: 560px; margin: 0 auto; display: grid; grid-template-co
 <nav class="tabs" id="tabs" hidden>
   <div class="in" role="tablist">
     <button class="tab" role="tab" data-tab="home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>홈</button>
-    <button class="tab" role="tab" data-tab="alerts"><svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>알림<span class="badge" id="badge" hidden></span></button>
     <button class="tab" role="tab" data-tab="history"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>내역</button>
-    <button class="tab" role="tab" data-tab="stats"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>분석</button>
-    <button class="tab" role="tab" data-tab="logs"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 10h16M4 14h10M4 18h7"/></svg>로그</button>
+    <button class="tab" role="tab" data-tab="stats"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>통계</button>
+    <button class="tab" role="tab" data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>설정</button>
   </div>
 </nav>
 

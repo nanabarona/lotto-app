@@ -142,11 +142,11 @@ const source = {
 
 /* ───────────── 상태 ───────────── */
 const S = {
-  tab: "home",
-  data: null,          // { app, ledger, purchases, balances, notifications, logFiles }
+  tab: "home", sub: null,
+  data: null,          // { app, ledger, purchases, balances, notifications, logFiles, research }
   runs: [], runsError: "",
   loading: false, loadedAt: null,
-  hist: { view: "ledger", game: "all", limit: 60 },
+  hist: { game: "all", limit: 60 },
   stats: { period: "all" },
   logs: { file: "", text: "", filter: "all", q: "" },
   polling: null,
@@ -189,21 +189,49 @@ async function loadAll() {
 }
 
 /* ───────────── 렌더링 공통 ───────────── */
+const TABS = ["home", "history", "stats", "settings"];
+const SUB_PAGES = {  // 설정 안의 하위 화면 (관리자 메뉴 포함)
+  alerts: { title: "알림", back: null, render: (v) => renderAlerts(v) },
+  runs: { title: "실행 관리", back: "settings", admin: true, render: (v) => renderRuns(v) },
+  research: { title: "번호 선택 엔진", back: "settings", admin: true, render: (v) => { v.innerHTML = researchCards(); } },
+  logs: { title: "실행 로그", back: "settings", admin: true, render: (v) => renderLogs(v) },
+};
+
 function render() {
   if (!S.data) return;
-  $("#sync").innerHTML = `${esc(S.data.app ? `기록 ${fmtWhen(S.data.app.generated_at)}` : "기록 없음")}<br>${esc(S.loadedAt ? `받아옴 ${ago(S.loadedAt)}` : "")}`;
-  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === S.tab)));
+  $("#sync").textContent = S.loadedAt ? `업데이트 ${ago(S.loadedAt)}` : "";
+  const active = S.sub ? (SUB_PAGES[S.sub].back || "") : S.tab;
+  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === active)));
   const unread = unreadCount();
   $("#badge").hidden = unread === 0;
   $("#badge").textContent = unread > 9 ? "9+" : String(unread);
   const view = $("#view");
-  ({ home: renderHome, alerts: renderAlerts, history: renderHistory, stats: renderStats, logs: renderLogs }[S.tab])(view);
+  if (S.sub) {
+    const page = SUB_PAGES[S.sub];
+    const holder = document.createElement("div");
+    holder.style.display = "grid";
+    holder.style.gap = "14px";
+    view.innerHTML = `<div class="sub-head"><button class="icon-btn" id="sub-back" aria-label="뒤로"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <h1>${esc(page.title)}</h1>${page.admin ? '<span class="admin-badge">관리자</span>' : ""}</div>`;
+    view.append(holder);
+    page.render(holder);
+    $("#sub-back").addEventListener("click", () => openSub(null));
+    return;
+  }
+  ({ home: renderHome, history: renderHistory, stats: renderStats, settings: renderSettings }[S.tab])(view);
 }
 
 function setTab(tab) {
-  S.tab = tab;
-  store.set({ tab });
-  if (tab === "alerts") S.seenBefore = undefined;  // 열 때마다 '새 알림' 표시 기준을 다시 잡는다
+  S.tab = TABS.includes(tab) ? tab : "home";
+  S.sub = null;
+  store.set({ tab: S.tab });
+  render();
+  window.scrollTo({ top: 0 });
+}
+
+function openSub(name) {
+  S.sub = name;
+  if (name === "alerts") S.seenBefore = undefined;  // 열 때마다 '새 알림' 표시 기준을 다시 잡는다
   render();
   window.scrollTo({ top: 0 });
 }
@@ -233,46 +261,114 @@ function rankPill(rank, prize) {
 }
 
 /* ───────────── 홈 ───────────── */
+/** 사용자에게 보여줄 이번 주 상태 문구 (내부 용어 없이). */
+function userStatus(st) {
+  const s = st.shortfall;
+  switch (st.kind) {
+    case "done":
+      return { title: "이번 주 구매 완료", lines: [`다음 자동 구매 ${st.next_try_text}`] };
+    case "charge":
+      return { title: "예치금 충전이 필요해요", charge: true,
+        lines: [`예치금 ${won(s?.balance)} · 이번 주 필요 ${won(s?.need)}`, `충전하면 자동으로 구매해요 (다음 확인 ${st.next_try_text})`] };
+    case "gave_up":
+      return { title: "이번 주는 구매하지 못했어요", charge: true,
+        lines: ["금요일까지 충전이 확인되지 않았어요", "지금 충전하면 바로 구매할 수 있어요"] };
+    case "blocked":
+      return { title: "로그인 정보를 확인해 주세요", lines: ["동행복권 로그인에 실패해서 이번 주 자동 구매를 멈췄어요", "설정 › 관리자 › 실행 관리에서 확인하세요"] };
+    default:
+      return { title: "자동 구매 예정", lines: [`${st.next_try_text}에 자동으로 구매해요`] };
+  }
+}
+
+/** 이번 주(월요일부터) 산 번호 — 이 프로그램 구매 기록이 우선, 없으면 계정 내역(직접 산 것)에서. */
+function thisWeekTickets() {
+  const { purchases, ledger } = S.data;
+  const mon = new Date();
+  mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7));
+  const monday = `${mon.getFullYear()}-${String(mon.getMonth() + 1).padStart(2, "0")}-${String(mon.getDate()).padStart(2, "0")}`;
+  const out = [];
+  for (const kind of ["lotto", "pension"]) {
+    const p = [...purchases].reverse().find((x) => x.game === (kind === "lotto" ? "lotto645" : "pension720") && (x.bought_at || "").slice(0, 10) >= monday);
+    if (p) {
+      out.push({ kind, round: p.round, detail: () => detailFromPurchase(p),
+        games: kind === "lotto" ? p.tickets : [], tickets: kind === "pension" ? pensionTickets(p.tickets) : [] });
+      continue;
+    }
+    const row = groupLedger(ledger.filter((e) => gameKey(e) === kind && e.date >= monday)).at(-1);
+    if (row) {
+      out.push({ kind, round: row.round, detail: () => detailFromLedger(row), games: row.games || [],
+        tickets: row.number ? [{ number: row.number, groups: [...row.groups].sort() }] : [] });
+    }
+  }
+  return out;
+}
+
 function renderHome(view) {
-  const { app, purchases, balances } = S.data;
+  const { app, balances, ledger } = S.data;
   const st = app?.status;
   const bal = app?.balance || balances.at(-1);
   let html = "";
 
   if (st) {
-    const canCharge = st.kind === "charge" || st.kind === "gave_up";
+    const u = userStatus(st);
     html += `
     <section class="card status" data-kind="${esc(st.kind)}">
       <div class="eyebrow">이번 주 · 로또 ${esc(st.week)}회</div>
       <div class="status-head">
         <span class="status-icon"><svg viewBox="0 0 24 24">${ICONS[st.kind] || ICONS.pending}</svg></span>
-        <span class="status-title">${esc(st.headline)}</span>
+        <span class="status-title">${esc(u.title)}</span>
       </div>
-      ${st.details?.length ? `<ul>${st.details.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
-      <div class="actions">
-        ${canCharge ? `<a class="btn primary grow" href="${esc(st.charge_url)}" target="_blank" rel="noopener">충전하기${st.shortfall ? ` (${won(st.shortfall.amount)})` : ""}</a>` : ""}
-        <button class="btn ${canCharge ? "" : "primary"} grow" data-run="real">지금 구매 시도</button>
-        <button class="btn grow" data-run="dry">모의 실행</button>
-      </div>
-      <div class="hint" style="margin-top:10px">${st.checked_at ? `마지막 확인 ${esc(fmtWhen(st.checked_at))} · ` : ""}이미 샀으면 '지금 구매 시도'를 눌러도 다시 사지 않아요.</div>
+      <ul>${u.lines.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>
+      ${u.charge ? `<div class="actions">
+        <a class="btn primary grow" href="${esc(st.charge_url)}" target="_blank" rel="noopener">충전하기${st.shortfall ? ` (${won(st.shortfall.amount)})` : ""}</a>
+        <button class="btn grow" data-run="real">충전했어요, 지금 구매</button>
+      </div>` : ""}
     </section>`;
   } else {
-    html += `<section class="card"><h2>이번 주 상태</h2><p class="empty">아직 자동 실행 기록이 없어요. 첫 자동 실행(월요일 07:17) 뒤에 표시돼요.</p></section>`;
+    html += `<section class="card"><h2>이번 주 자동 구매</h2><p class="empty">첫 자동 구매(월요일 07:17) 뒤에 표시돼요.</p></section>`;
   }
 
   html += `<div class="tiles">
     <div class="tile"><div class="k">예치금</div><div class="v num">${bal ? won(bal.balance) : "–"}</div><div class="s">${bal ? `${esc(fmtWhen(bal.at))} 기준` : "기록 없음"}</div></div>
-    <div class="tile"><div class="k">다음 자동 실행</div><div class="v" style="font-size:17px;margin-top:6px">${esc(st?.next_try_text || "월 07:17")}</div><div class="s">월 2시간마다 · 화~금 하루 4번</div></div>
+    <div class="tile"><div class="k">매주 자동 구매</div><div class="v" style="font-size:17px;margin-top:6px">월요일 오전</div><div class="s">로또 5게임 · 연금 1~5조 (1만원)</div></div>
   </div>`;
 
-  const lastLotto = [...purchases].reverse().find((p) => p.game === "lotto645");
-  const lastPension = [...purchases].reverse().find((p) => p.game === "pension720");
-  html += `<section class="card"><h2>최근 자동 구매 번호</h2>`;
-  if (!lastLotto && !lastPension) html += `<p class="empty">아직 이 프로그램으로 산 번호가 없어요.</p>`;
-  if (lastLotto) html += purchaseBlock(lastLotto);
-  if (lastPension) html += purchaseBlock(lastPension);
+  const mine = thisWeekTickets();
+  html += `<section class="card"><h2>이번 주 내 번호</h2>`;
+  if (!mine.length) html += `<p class="empty">이번 주 번호가 아직 없어요. 자동 구매가 끝나면 여기에 나와요.</p>`;
+  mine.forEach((m, i) => {
+    html += `<div class="tap-block" data-mine="${i}" role="button" tabindex="0" style="margin-top:6px">
+      <div class="eyebrow">${m.kind === "lotto" ? "로또 6/45" : "연금복권 720+"} · ${esc(m.round)}회</div>
+      ${m.kind === "lotto"
+        ? m.games.map((g) => `<div class="ticket"><span class="slot">${esc(g.slot)}</span>${g.numbers?.length ? balls(g.numbers) : '<span class="muted">자동번호</span>'}<span></span></div>`).join("")
+        : m.tickets.map((t) => `<div class="ticket wide"><div class="balls"><span class="jo">${t.groups.join(",") === "1,2,3,4,5" ? "1~5조" : esc(t.groups.map((g) => `${g}조`).join(" "))}</span>${digits(t.number)}</div><span></span></div>`).join("")}
+    </div>`;
+  });
   html += `</section>`;
 
+  // 가장 최근에 추첨이 끝난 로또·연금 결과
+  const done = groupLedger(ledger.filter((e) => e.result !== "미추첨"));
+  const lastOf = (k) => [...done].reverse().find((e) => gameKey(e) === k);
+  const recent = ["lotto", "pension"].map(lastOf).filter(Boolean);
+  if (recent.length) {
+    html += `<section class="card"><h2>지난 결과</h2><div class="list">${recent.map((e, i) =>
+      `<div class="row tap" data-last="${i}" role="button" tabindex="0"><div><div class="t">${esc(e.game)} ${esc(e.round)}회</div><div class="d">${esc(fmtWhen(e.date, false))} 구매</div></div>${rankPill(ledgerRank(e), e.prize)}</div>`).join("")}</div></section>`;
+  }
+  view.innerHTML = html;
+
+  view.querySelectorAll("[data-run]").forEach((b) => b.addEventListener("click", () => runWorkflow(false)));
+  view.querySelectorAll("[data-mine]").forEach((el) => el.addEventListener("click", () => openDetail(mine[+el.dataset.mine].detail())));
+  view.querySelectorAll("[data-last]").forEach((el) => el.addEventListener("click", () => openDetail(detailFromLedger(recent[+el.dataset.last]))));
+}
+
+/* ── 관리자: 실행 관리 ── */
+function renderRuns(view) {
+  let html = `<section class="card"><h2>수동 실행</h2>
+    <p class="hint" style="margin:0 0 10px">모의 실행은 로그인부터 결제 직전까지만 확인해요. 지금 구매 시도는 이번 주에 이미 샀으면 아무것도 사지 않아요.</p>
+    <div class="actions" style="margin-top:0">
+      <button class="btn primary grow" data-run="dry">모의 실행</button>
+      <button class="btn grow" data-run="real">지금 구매 시도</button>
+    </div></section>`;
   html += `<section class="card"><h2>실행 기록 <small>GitHub Actions</small></h2>`;
   if (S.runsError) html += `<p class="empty">${esc(S.runsError)}</p>`;
   else if (!S.runs.length) html += `<p class="empty">실행 기록이 없어요.</p>`;
@@ -287,30 +383,19 @@ function renderHome(view) {
     }).join("")}</div>`;
   }
   html += `</section>`;
+  const st = S.data.app?.status;
+  if (st) {
+    html += `<section class="card"><h2>시스템 상태</h2><div class="list">
+      <div class="row"><div class="t">상태 코드</div><span class="pill mute">${esc(st.kind)}</span></div>
+      <div class="row"><div class="t">마지막 확인</div><span class="d">${esc(fmtWhen(st.checked_at))}</span></div>
+      <div class="row"><div class="t">다음 자동 실행</div><span class="d">${esc(st.next_try_text)}</span></div>
+      <div class="row"><div class="t">기록 생성</div><span class="d">${esc(fmtWhen(S.data.app.generated_at))}</span></div>
+    </div>${st.details?.length ? `<ul class="hint" style="margin:8px 0 0;padding-left:18px">${st.details.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}</section>`;
+  }
   view.innerHTML = html;
-
   view.querySelectorAll("[data-run]").forEach((b) => b.addEventListener("click", () => runWorkflow(b.dataset.run === "dry")));
 }
 
-function purchaseBlock(p) {
-  const name = p.game === "lotto645" ? "로또 6/45" : "연금복권 720+";
-  let body = "";
-  if (p.game === "lotto645") {
-    body = p.tickets.map((t, i) => `<div class="ticket"><span class="slot">${esc(t.slot)}</span>${t.numbers?.length ? balls(t.numbers) : '<span class="muted">자동번호</span>'}${
-      p.result ? rankPill(p.result[i] === "낙첨" ? null : p.result[i]) : '<span class="pill warn">추첨 전</span>'}</div>`).join("");
-  } else {
-    const byNumber = {};
-    p.tickets.forEach((t, i) => { (byNumber[t.number] ||= []).push({ g: t.group, r: p.result?.[i] }); });
-    body = Object.entries(byNumber).map(([num, list]) => {
-      const groups = list.map((x) => x.g).sort();
-      const where = groups.join(",") === "1,2,3,4,5" ? "1~5조" : groups.map((g) => `${g}조`).join(" ");
-      const best = list.find((x) => x.r && x.r !== "낙첨")?.r;
-      return `<div class="ticket wide"><div class="balls"><span class="jo">${esc(where)}</span>${digits(num)}</div>${
-        p.result ? rankPill(best || null) : '<span class="pill warn">추첨 전</span>'}</div>`;
-    }).join("");
-  }
-  return `<div style="margin-top:6px"><div class="eyebrow">${esc(name)} · ${esc(p.round)}회 · ${esc(fmtWhen(p.bought_at, false))}</div>${body}</div>`;
-}
 
 async function runWorkflow(dry) {
   const msg = dry ? "결제 직전까지만 확인하는 모의 실행을 시작할까요?"
@@ -331,7 +416,7 @@ function pollRuns() {
     tries += 1;
     try { S.runs = await source.runs(); } catch { /* 다음 번에 */ }
     const busy = S.runs.some((r) => r.status !== "completed");
-    if (S.tab === "home") render();
+    if (S.sub === "runs") render();
     if ((!busy && tries > 2) || tries > 24) {
       clearInterval(S.polling);
       loadAll();
@@ -356,7 +441,7 @@ function renderAlerts(view) {
     $("#badge").hidden = true;
   }
   const seen = S.seenBefore;
-  let html = `<section class="card"><h2>알림 기록 <small>휴대폰으로 보낸 알림 전체</small></h2>`;
+  let html = `<section class="card"><h2>받은 알림 <small>폰으로 보낸 알림을 모두 모아 둬요</small></h2>`;
   if (!list.length) html += `<p class="empty">아직 보낸 알림이 없어요.</p>`;
   html += list.slice(0, 150).map((n) => {
     const important = n.priority >= 4;
@@ -401,17 +486,12 @@ function groupLedger(entries) {
 
 function renderHistory(view) {
   const h = S.hist;
-  let html = `<div class="chips" role="group" aria-label="보기">
-      <button class="chip" data-view="ledger" aria-pressed="${h.view === "ledger"}">계정 구매내역</button>
-      <button class="chip" data-view="mine" aria-pressed="${h.view === "mine"}">자동 구매 번호</button>
-    </div>`;
-
-  if (h.view === "ledger") {
+  let html = "";
+  {
     const all = groupLedger([...S.data.ledger].filter((e) => h.game === "all" || gameKey(e) === h.game)).reverse();
-    html += `<section class="card">
-      <div class="chips" role="group" aria-label="복권 종류" style="margin-bottom:6px">
+    html += `<div class="chips" role="group" aria-label="복권 종류">
         ${[["all", "전체"], ["lotto", "로또"], ["pension", "연금복권"]].map(([k, l]) => `<button class="chip" data-game="${k}" aria-pressed="${h.game === k}">${l}</button>`).join("")}
-      </div>`;
+      </div><section class="card"><p class="hint" style="margin:0 0 2px">항목을 누르면 내 번호와 당첨번호를 비교해 볼 수 있어요.</p>`;
     if (!all.length) html += `<p class="empty">내역이 없어요.</p>`;
     let month = "";
     const monthly = {};
@@ -429,13 +509,6 @@ function renderHistory(view) {
     });
     if (all.length > h.limit) html += `<div class="actions"><button class="btn grow" id="more">더 보기 (${all.length - h.limit}건 남음)</button></div>`;
     html += `</section>`;
-  } else {
-    const mine = [...S.data.purchases].reverse();
-    h.mine = mine;
-    html += `<section class="card"><h2>이 프로그램이 산 번호 <small>눌러서 당첨번호와 비교</small></h2>`;
-    html += mine.length ? mine.map((p, i) => `<div class="tap-block" data-p="${i}" role="button" tabindex="0">${purchaseBlock(p)}</div>`)
-      .join('<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">') : `<p class="empty">아직 없어요.</p>`;
-    html += `</section>`;
   }
   view.innerHTML = html;
   const open = (el, detail) => {
@@ -443,8 +516,6 @@ function renderHistory(view) {
     el.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(detail()); } });
   };
   view.querySelectorAll("[data-i]").forEach((el) => open(el, () => detailFromLedger(h.rows[+el.dataset.i])));
-  view.querySelectorAll("[data-p]").forEach((el) => open(el, () => detailFromPurchase(h.mine[+el.dataset.p])));
-  view.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => { h.view = b.dataset.view; render(); }));
   view.querySelectorAll("[data-game]").forEach((b) => b.addEventListener("click", () => { h.game = b.dataset.game; h.limit = 60; render(); }));
   $("#more")?.addEventListener("click", () => { h.limit += 60; render(); });
 }
@@ -583,13 +654,27 @@ async function openDetail(d) {
 
 function researchHtml(r, pension) {
   if (!r) return "";
-  let html = `<div><div class="sec-title">번호를 이렇게 고른 이유</div><p class="hint" style="margin:0 0 6px">${esc(r.summary || "")}</p>`;
-  if (!pension && r.tickets?.length) {
-    html += `<div class="table-wrap"><table><thead><tr><th>게임</th><th class="r">인기도</th><th class="r">1등 시 예상 몫</th></tr></thead><tbody>
-      ${r.tickets.map((t) => `<tr><td>${esc(t.slot)}</td><td class="r">${t.popularity.toFixed(2)}배</td><td class="r">${t.first_prize_multiplier.toFixed(2)}배</td></tr>`).join("")}
-      </tbody></table></div><p class="hint" style="margin:6px 0 0">인기도 1.00 = 평균 조합. 낮을수록 남들이 덜 고른 조합이라 1~3등이 되면 나눠 갖는 사람이 적어요. 당첨 확률 자체는 모든 조합이 같아요.</p>`;
+  if (pension) {
+    return `<div><div class="sec-title">이렇게 골랐어요</div><p class="hint" style="margin:0">같은 번호로 1~5조를 모두 사서, 번호가 맞으면 1등과 2등을 함께 받을 수 있어요.</p></div>`;
   }
-  return html + `</div>`;
+  if (!r.distinct_numbers) return `<div><div class="sec-title">이렇게 골랐어요</div><p class="hint" style="margin:0">${esc(r.summary || "")}</p></div>`;
+  const mult = r.tickets?.length ? r.tickets.reduce((s, t) => s + t.first_prize_multiplier, 0) / r.tickets.length : 0;
+  return `<div><div class="sec-title">이렇게 골랐어요</div><ul class="hint" style="margin:0;padding-left:18px;display:grid;gap:2px">
+    <li>5게임이 서로 겹치지 않게 ${esc(r.distinct_numbers)}개 숫자로 나눠 이번 주 당첨 기회를 넓혔어요</li>
+    <li>남들이 덜 고르는 조합이라 1~3등이 되면 나눠 갖는 사람이 적어요${mult ? ` (1등 시 예상 당첨금 약 ${mult.toFixed(1)}배)` : ""}</li>
+  </ul></div>`;
+}
+
+function methodCard() {
+  return `<section class="card"><h2>번호는 이렇게 골라요</h2>
+    <ul style="margin:0;padding-left:18px;display:grid;gap:6px;color:var(--ink-2)">
+      <li><b>로또</b> — 5게임이 서로 번호를 나눠 갖지 않게 골라 매주 당첨 기회를 가장 넓게 잡아요.</li>
+      <li>그중에서도 <b>남들이 덜 고르는 조합</b>을 골라, 1~3등이 되면 당첨금을 나눠 갖는 사람을 줄여요.</li>
+      <li><b>연금복권</b> — 같은 번호로 1~5조를 모두 사서 1등과 2등을 함께 노려요.</li>
+      <li>매주 최신 당첨 결과로 다시 분석해서 골라요.</li>
+    </ul>
+    <p class="hint" style="margin:10px 0 0">복권은 매 회 무작위 추첨이라 어떤 조합이든 1등 확률은 같아요 (로또 1/8,145,060).</p>
+  </section>`;
 }
 
 function researchCards() {
@@ -620,9 +705,9 @@ function researchCards() {
     return `<section class="card"><h2>${title} <small>${adopted ? `${adopted}개 채택` : "채택된 가설 없음"} · ${esc(fmtWhen(R.generated_at))}</small></h2>
       <p class="hint" style="margin:0 0 8px">${part === "lotto" ? `매 회차 '그 회차 이전 데이터만' 보고 골랐을 때 실제로 더 맞았는지 ${esc(P.backtest_draws)}회로 검증했어요.` : "연금복권 이력 전체로 검증했어요."} 효과가 확인된 가설만 번호 선택에 자동 반영돼요.</p>
       <div class="list">${P.tests.map((t) => `<details class="row" style="display:block">
-        <summary style="display:flex;justify-content:space-between;gap:10px;cursor:pointer;list-style:none">
+        <summary style="display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;list-style:none">
           <span class="t">${esc(t.name)}</span>
-          <span class="pill ${t.verdict === "채택" ? "good" : t.verdict === "기각" ? "mute" : "warn"}">${esc(t.verdict)}</span>
+          <span class="pill ${t.verdict === "채택" ? "good" : t.verdict === "기각" ? "mute" : "warn"}" style="flex:none">${esc(t.verdict)}</span>
         </summary>
         <div class="d" style="margin-top:6px">가설: ${esc(t.claim)}</div>
         <div class="d">방법: ${esc(t.method)}</div>
@@ -667,11 +752,11 @@ function renderStats(view) {
     ranks[k].n += 1; ranks[k].sum += e.prize;
   });
 
-  let html = researchCards() + `<div class="eyebrow" style="margin-top:6px">내 구매 수익률</div><div class="chips" role="group" aria-label="기간">
+  let html = `<div class="chips" role="group" aria-label="기간">
     ${[["all", "전체 기간"], ["12m", "최근 12개월"], ["year", "올해"]].map(([k, l]) => `<button class="chip" data-period="${k}" aria-pressed="${S.stats.period === k}">${l}</button>`).join("")}
   </div>`;
 
-  if (!entries.length) { view.innerHTML = html + `<section class="card"><p class="empty">이 기간의 내역이 없어요.</p></section>`; bindPeriod(view); return; }
+  if (!entries.length) { view.innerHTML = html + `<section class="card"><p class="empty">이 기간의 내역이 없어요.</p></section>` + methodCard(); bindPeriod(view); return; }
 
   html += `<div class="tiles">
     <div class="tile"><div class="k">총 구매</div><div class="v num">${won(spend)}</div><div class="s">${entries.reduce((s, e) => s + e.qty, 0).toLocaleString()}매</div></div>
@@ -698,6 +783,7 @@ function renderStats(view) {
     <thead><tr><th>복권</th><th>등수</th><th class="r">횟수</th><th class="r">당첨금</th></tr></thead><tbody>
     ${rankRows.map((r) => `<tr><td>${esc(r.game)}</td><td>${r.rank ? `${esc(r.rank)}등` : "당첨"}</td><td class="r">${r.n}</td><td class="r">${won(r.sum)}</td></tr>`).join("")}
     </tbody></table></div>` : `<p class="empty">이 기간에는 당첨이 없어요.</p>`}</section>`;
+  html += methodCard();
 
   view.innerHTML = html;
   bindPeriod(view);
@@ -941,35 +1027,74 @@ function showPin() {
   g.querySelector("#p-reset").addEventListener("click", () => { if (confirm("이 폰에 저장된 연결 정보를 지우고 다시 연결할까요?")) { store.clear(); showSetup(); } });
 }
 
-function openSettings() {
+function menuRow({ id, sub, title, desc, danger }) {
+  return `<button class="menu-row" ${id ? `id="${id}"` : ""} ${sub ? `data-sub="${sub}"` : ""} type="button">
+    <span><b${danger ? ' style="color:var(--bad)"' : ""}>${esc(title)}</b>${desc ? `<small>${esc(desc)}</small>` : ""}</span><i class="chev" aria-hidden="true"></i></button>`;
+}
+
+function renderSettings(view) {
   const cfg = store.get();
   const theme = cfg.theme || "system";
-  const bg = document.createElement("div");
-  bg.className = "sheet-bg";
-  bg.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="설정">
-    <h3>설정</h3>
-    <div class="field"><label>연결된 저장소</label><div>${esc(MODE === "demo" ? "데모 (예시 데이터)" : MODE === "local" ? "로컬 파일" : cfg.repo)}</div>
-      ${MODE === "live" ? `<span class="hint">${cfg.sealed ? "토큰은 PIN 으로 암호화되어 이 폰에만 저장돼 있어요." : "토큰이 암호화 없이 저장돼 있어요. PIN 을 설정하면 더 안전해요."}</span>` : ""}</div>
-    <div class="field"><label for="s-theme">화면 모드</label><select id="s-theme">
-      ${[["system", "시스템 설정 따르기"], ["light", "밝게"], ["dark", "어둡게"]].map(([k, l]) => `<option value="${k}" ${k === theme ? "selected" : ""}>${l}</option>`).join("")}
-    </select></div>
-    ${MODE === "live" ? `<button class="btn grow" id="s-pin">${cfg.sealed ? "PIN 바꾸기 / 연결 다시 하기" : "PIN 설정하기 (연결 다시 하기)"}</button>
-      <button class="btn grow" id="s-lock">지금 잠그기</button>
-      <button class="btn grow" id="s-out" style="color:var(--bad)">이 폰에서 연결 해제</button>` : ""}
-    ${MODE !== "live" ? `<a class="btn grow" href="./">내 계정으로 연결하기</a>` : `<a class="btn grow" href="?demo">데모 화면 보기 (공유용)</a>`}
-    <p class="hint">다른 사람에게 보여줄 때는 이 앱 주소 뒤에 <b>?demo</b> 를 붙인 링크를 보내세요. 예시 데이터만 보이고 내 기록은 보이지 않아요.</p>
-    <button class="btn primary grow" id="s-close">닫기</button>
-  </div>`;
-  document.body.append(bg);
-  const close = () => bg.remove();
-  bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
-  bg.querySelector("#s-close").addEventListener("click", close);
-  bg.querySelector("#s-theme").addEventListener("change", (e) => { store.set({ theme: e.target.value }); applyTheme(); });
-  bg.querySelector("#s-pin")?.addEventListener("click", () => { close(); showSetup(); });
-  bg.querySelector("#s-lock")?.addEventListener("click", () => { close(); source.token = ""; S.data = null; store.get().sealed ? showPin() : showSetup(); });
-  bg.querySelector("#s-out")?.addEventListener("click", () => {
-    if (!confirm("이 폰에서 토큰과 연결 정보를 지울까요? (GitHub 의 토큰 자체는 GitHub 설정에서 삭제하세요)")) return;
-    store.clear(); close(); source.token = ""; S.data = null; showSetup();
+  const R = S.data.research;
+  const lastRun = S.runs[0];
+  const runDesc = S.runsError ? "권한 확인 필요" : lastRun
+    ? `최근 ${lastRun.event === "schedule" ? "자동" : "직접"} 실행 ${fmtWhen(lastRun.created_at)} · ${lastRun.status !== "completed" ? "진행 중" : lastRun.conclusion === "success" ? "완료" : "실패"}`
+    : "실행 기록 없음";
+  const nTests = R ? R.lotto.tests.length + R.pension.tests.length : 0;
+  const nAdopted = R ? R.lotto.adopted.length + R.pension.adopted.length : 0;
+  const demoUrl = `${location.origin}${location.pathname}?demo`;
+
+  view.innerHTML = `
+    <section class="card"><h2>자동 구매</h2><div class="list">
+      <div class="row"><div class="t">로또 6/45</div><span class="d">매주 5게임 · 5,000원</span></div>
+      <div class="row"><div class="t">연금복권 720+</div><span class="d">1~5조 같은 번호 · 5,000원</span></div>
+      <div class="row"><div class="t">구매 시간</div><span class="d">월요일 07:17 · 못 사면 금요일까지 재시도</span></div>
+      <div class="row"><div class="t">예치금이 부족하면</div><span class="d">부족한 만큼 충전 요청 알림</span></div>
+    </div></section>
+
+    ${MODE === "live" ? `<section class="card"><h2>보안</h2>
+      <p class="hint" style="margin:0 0 6px">${cfg.sealed ? "연결 정보는 PIN 으로 암호화되어 이 기기에만 저장돼 있어요." : "연결 정보가 암호화 없이 저장돼 있어요. PIN 을 설정하면 더 안전해요."}</p>
+      <div class="menu">
+        ${menuRow({ id: "s-pin", title: cfg.sealed ? "PIN 바꾸기" : "PIN 설정하기", desc: "연결을 다시 하면서 새 PIN 을 정해요" })}
+        ${menuRow({ id: "s-lock", title: "지금 잠그기" })}
+        ${menuRow({ id: "s-out", title: "이 기기에서 연결 해제", danger: true })}
+      </div></section>`
+    : `<section class="card"><h2>계정</h2><p class="hint" style="margin:0 0 8px">${MODE === "demo" ? "지금은 예시 데이터로 보는 데모예요." : "로컬 파일로 보는 중이에요."}</p>
+      <a class="btn primary grow" href="./">내 계정으로 연결하기</a></section>`}
+
+    <section class="card"><h2>화면</h2>
+      <div class="field"><label for="s-theme">화면 모드</label><select id="s-theme">
+        ${[["system", "시스템 설정 따르기"], ["light", "밝게"], ["dark", "어둡게"]].map(([k, l]) => `<option value="${k}" ${k === theme ? "selected" : ""}>${l}</option>`).join("")}
+      </select></div></section>
+
+    <section class="card"><h2>공유</h2>
+      <p class="hint" style="margin:0 0 8px">예시 데이터로만 보이는 데모 링크예요. 내 기록은 보이지 않아요.</p>
+      <div class="actions" style="margin-top:0">
+        <button class="btn grow" id="s-copy">데모 링크 복사</button>
+        <a class="btn grow" href="?demo">데모 열어보기</a>
+      </div></section>
+
+    <section class="card admin"><h2>관리자 <span class="admin-badge">관리자</span></h2>
+      <p class="hint" style="margin:0 0 6px">서비스 운영용 화면이에요. 일반 사용자에게는 필요 없는 정보예요.</p>
+      <div class="menu">
+        ${menuRow({ sub: "runs", title: "실행 관리", desc: runDesc })}
+        ${menuRow({ sub: "research", title: "번호 선택 엔진", desc: R ? `가설 ${nTests}개 검증 · 채택 ${nAdopted}개 · ${fmtWhen(R.generated_at)}` : "분석 결과 없음" })}
+        ${menuRow({ sub: "logs", title: "실행 로그", desc: S.data.logFiles?.length
+          ? `${S.data.logFiles[0].replace(".log", "")}${S.data.logFiles.length > 1 ? ` 외 ${S.data.logFiles.length - 1}개월` : ""} · 오류만 골라 보기 가능` : "로그 없음" })}
+      </div></section>
+
+    <p class="hint" style="text-align:center">복권 수첩 · 데이터 기준 ${esc(fmtWhen(S.data.app?.generated_at) || "–")}</p>`;
+
+  view.querySelectorAll("[data-sub]").forEach((b) => b.addEventListener("click", () => openSub(b.dataset.sub)));
+  view.querySelector("#s-theme").addEventListener("change", (e) => { store.set({ theme: e.target.value }); applyTheme(); });
+  view.querySelector("#s-copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(demoUrl); toast("데모 링크를 복사했어요."); } catch { prompt("아래 링크를 복사하세요", demoUrl); }
+  });
+  view.querySelector("#s-pin")?.addEventListener("click", () => showSetup());
+  view.querySelector("#s-lock")?.addEventListener("click", () => { source.token = ""; S.data = null; store.get().sealed ? showPin() : showSetup(); });
+  view.querySelector("#s-out")?.addEventListener("click", () => {
+    if (!confirm("이 기기에서 연결 정보를 지울까요? (GitHub 의 토큰 자체는 GitHub 설정에서 삭제하세요)")) return;
+    store.clear(); source.token = ""; S.data = null; showSetup();
   });
 }
 
@@ -1076,14 +1201,14 @@ function boot() {
   applyTheme();
   document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setTab(t.dataset.tab)));
   $("#btn-refresh").addEventListener("click", () => { S.logs.text = ""; loadAll(); });
-  $("#btn-settings").addEventListener("click", openSettings);
+  $("#btn-bell").addEventListener("click", () => openSub("alerts"));
   let resizeTimer;
   window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (S.tab === "stats") render(); }, 200); });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && S.data && MODE === "live" && Date.now() - (S.loadedAt || 0) > 5 * 60000) loadAll();
   });
   const saved = store.get().tab;
-  if (["home", "alerts", "history", "stats", "logs"].includes(saved)) S.tab = saved;
+  if (TABS.includes(saved)) S.tab = saved;
   if (MODE === "demo") $("#demo-bar").hidden = false;
 
   if (MODE !== "live") { showApp(); loadAll(); return; }
