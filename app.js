@@ -598,8 +598,11 @@ function researchCards() {
   let html = "";
   const M = R.model;
   if (M) {
-    html += `<section class="card"><h2>이번 주 번호 선택 <small>${esc(fmtWhen(M.fitted_at))} 분석</small></h2>
+    html += `<section class="card"><h2>${M.preview ? "다음 구매 번호 미리보기" : "이번 주 번호 선택"} <small>${esc(fmtWhen(M.fitted_at))} 분석</small></h2>
+      ${M.preview ? '<p class="hint" style="margin:0 0 8px">지금 데이터로 고르면 이렇게 돼요. 실제 구매 때는 그 시점의 최신 당첨 결과로 다시 분석해서 고릅니다.</p>' : ""}
       <p style="margin:0 0 10px;color:var(--ink-2)">${esc(M.summary)}</p>
+      ${(M.tickets || []).map((t) => `<div class="ticket"><span class="slot">${esc(t.slot)}</span>${balls(t.numbers)}<span class="pill mute">${t.popularity.toFixed(2)}배</span></div>`).join("")}
+      <p class="hint" style="margin:6px 0 10px">오른쪽 숫자 = 인기도 (1.00 = 평균 조합, 낮을수록 남들이 덜 고른 조합)</p>
       <div class="tiles">
         <div class="tile"><div class="k">겹치지 않은 숫자</div><div class="v num">${esc(M.distinct_numbers)}개</div><div class="s">5게임 기준 · 많을수록 이번 주 당첨 기회 ↑</div></div>
         <div class="tile"><div class="k">인기도 모델 검증</div><div class="v num">${Math.round((1 - M.validation.low_vs_high) * 100)}%</div><div class="s">비인기로 본 조합의 실제 공동 당첨자 감소 (최근 ${esc(M.validation.holdout_draws)}회)</div></div>
