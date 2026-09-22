@@ -1,5 +1,5 @@
 // 앱 화면(껍데기)만 오프라인용으로 보관. 데이터(GitHub API)는 항상 새로 받는다.
-const CACHE = "lotto-app-v1";
+const CACHE = "lotto-app-v2";
 const SHELL = ["./", "./index.html", "./app.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {

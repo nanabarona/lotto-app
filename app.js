@@ -18,7 +18,7 @@ const won = (n) => `${Math.round(n || 0).toLocaleString("ko-KR")}원`;
 const shortWon = (n) => {
   const a = Math.abs(n);
   if (a >= 1e8) return `${+(n / 1e8).toFixed(1)}억`;
-  if (a >= 1e4) return `${+(n / 1e4).toFixed(a >= 1e5 ? 0 : 1)}만`;
+  if (a >= 1e4) return `${+(n / 1e4).toFixed(1)}만`;
   return `${n.toLocaleString("ko-KR")}`;
 };
 
@@ -160,16 +160,19 @@ async function loadAll() {
     if (MODE === "demo") {
       S.data = demoData();
       S.runs = S.data.runs;
+      // 공개 당첨 데이터로만 만든 가설 검증 결과 스냅숏 (개인 데이터 아님)
+      try { S.data.research = await (await fetch("demo-research.json")).json(); } catch { S.data.research = null; }
     } else {
-      const [app, ledger, purchases, balances, notifications, logFiles] = await Promise.all([
+      const [app, ledger, purchases, balances, notifications, logFiles, research] = await Promise.all([
         source.json("data/app.json", null),
         source.json("data/ledger.json", []),
         source.json("data/purchases.json", []),
         source.json("data/balance.json", []),
         source.json("data/notifications.json", []),
         source.logFiles(),
+        source.json("data/research.json", null),
       ]);
-      S.data = { app, ledger, purchases, balances, notifications, logFiles };
+      S.data = { app, ledger, purchases, balances, notifications, logFiles, research };
       try { S.runs = await source.runs(); S.runsError = ""; } catch (e) { S.runs = []; S.runsError = apiMessage(e, true); }
     }
     S.loadedAt = new Date();
@@ -413,7 +416,8 @@ function renderHistory(view) {
     let month = "";
     const monthly = {};
     all.forEach((e) => { const m = e.date.slice(0, 7); (monthly[m] ||= [0, 0]); monthly[m][0] += e.qty * 1000; monthly[m][1] += e.prize || 0; });
-    all.slice(0, h.limit).forEach((e) => {
+    h.rows = all;
+    all.slice(0, h.limit).forEach((e, i) => {
       const m = e.date.slice(0, 7);
       if (m !== month) {
         month = m;
@@ -421,20 +425,211 @@ function renderHistory(view) {
       }
       const gs = [...e.groups].sort();
       const num = e.number ? ` · ${gs.join(",") === "1,2,3,4,5" ? "1~5조" : gs.map((g) => `${g}조`).join(" ")} ${e.number}` : "";
-      html += `<div class="row"><div><div class="t">${esc(e.game)} ${e.round ? `${esc(e.round)}회` : ""}</div><div class="d">${esc(fmtWhen(e.date, false))} · ${esc(e.qty)}매${esc(num)}</div></div>${rankPill(ledgerRank(e), e.prize)}</div>`;
+      html += `<div class="row tap" data-i="${i}" role="button" tabindex="0" aria-label="${esc(e.game)} ${esc(e.round)}회 상세 보기"><div><div class="t">${esc(e.game)} ${e.round ? `${esc(e.round)}회` : ""}</div><div class="d">${esc(fmtWhen(e.date, false))} · ${esc(e.qty)}매${esc(num)}</div></div>${rankPill(ledgerRank(e), e.prize)}</div>`;
     });
     if (all.length > h.limit) html += `<div class="actions"><button class="btn grow" id="more">더 보기 (${all.length - h.limit}건 남음)</button></div>`;
     html += `</section>`;
   } else {
     const mine = [...S.data.purchases].reverse();
-    html += `<section class="card"><h2>이 프로그램이 산 번호</h2>`;
-    html += mine.length ? mine.map(purchaseBlock).join('<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">') : `<p class="empty">아직 없어요.</p>`;
+    h.mine = mine;
+    html += `<section class="card"><h2>이 프로그램이 산 번호 <small>눌러서 당첨번호와 비교</small></h2>`;
+    html += mine.length ? mine.map((p, i) => `<div class="tap-block" data-p="${i}" role="button" tabindex="0">${purchaseBlock(p)}</div>`)
+      .join('<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">') : `<p class="empty">아직 없어요.</p>`;
     html += `</section>`;
   }
   view.innerHTML = html;
+  const open = (el, detail) => {
+    el.addEventListener("click", () => openDetail(detail()));
+    el.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openDetail(detail()); } });
+  };
+  view.querySelectorAll("[data-i]").forEach((el) => open(el, () => detailFromLedger(h.rows[+el.dataset.i])));
+  view.querySelectorAll("[data-p]").forEach((el) => open(el, () => detailFromPurchase(h.mine[+el.dataset.p])));
   view.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => { h.view = b.dataset.view; render(); }));
   view.querySelectorAll("[data-game]").forEach((b) => b.addEventListener("click", () => { h.game = b.dataset.game; h.limit = 60; render(); }));
   $("#more")?.addEventListener("click", () => { h.limit += 60; render(); });
+}
+
+/* ───────────── 상세 (번호 · 당첨번호 비교) ───────────── */
+async function loadDraws() {
+  if (S.draws) return S.draws;
+  const toMap = (list) => Object.fromEntries((list || []).map((d) => [d.round, d]));
+  if (MODE === "demo") S.draws = S.data.draws;
+  else {
+    const [lotto, pension] = await Promise.all([
+      source.json("data/lotto645_history.json", []), source.json("data/pension720_history.json", []),
+    ]);
+    S.draws = { lotto: toMap(lotto), pension: toMap(pension) };
+  }
+  return S.draws;
+}
+
+function pensionTickets(list) {  // [{group, number}] → [{groups:[...], number}]
+  const by = {};
+  list.forEach((t) => { (by[t.number] ||= []).push(String(t.group)); });
+  return Object.entries(by).map(([number, groups]) => ({ number, groups: groups.sort() }));
+}
+
+function detailFromLedger(e) {
+  const pension = gameKey(e) === "pension";
+  let games = e.games || [];
+  if (!pension && !games.length) {  // 이 프로그램으로 산 회차면 기록해 둔 번호로
+    const p = S.data.purchases.find((x) => x.game === "lotto645" && x.round === e.round && x.tickets.some((t) => t.numbers?.length));
+    if (p) games = p.tickets;
+  }
+  const research = S.data.purchases.find((x) => x.game === (pension ? "pension720" : "lotto645") && x.round === e.round)?.research;
+  return {
+    pension, game: e.game, round: e.round, date: e.date, qty: e.qty, prize: e.prize || 0, result: e.result, rank: e.rank,
+    games, tickets: pension && e.number ? [{ number: e.number, groups: [...e.groups].sort() }] : [], research,
+  };
+}
+
+function detailFromPurchase(p) {
+  const pension = p.game === "pension720";
+  const rows = groupLedger(S.data.ledger.filter((e) => gameKey(e) === (pension ? "pension" : "lotto") && e.round === p.round));
+  const prize = rows.reduce((s, e) => s + (e.prize || 0), 0);
+  const result = !rows.length ? (p.result ? "" : "미추첨") : rows.some((e) => e.result === "미추첨") ? "미추첨" : prize > 0 ? "당첨" : "낙첨";
+  return {
+    pension, game: pension ? "연금복권720+" : "로또6/45", round: p.round, date: (p.bought_at || "").slice(0, 10),
+    qty: p.tickets.length, prize, result, rank: rows.find((e) => e.rank)?.rank,
+    games: pension ? [] : p.tickets, tickets: pension ? pensionTickets(p.tickets) : [], research: p.research,
+  };
+}
+
+function lottoRankOf(nums, draw) {
+  const hit = nums.filter((n) => draw.numbers.includes(n)).length;
+  if (hit === 6) return "1등";
+  if (hit === 5 && nums.includes(draw.bonus)) return "2등";
+  return { 5: "3등", 4: "4등", 3: "5등" }[hit] || null;
+}
+function pensionRankOf(group, number, draw) {
+  if (number === draw.number) return String(group) === String(draw.group) ? "1등" : "2등";
+  if (number === draw.bonus) return "보너스";
+  for (let k = 5; k >= 1; k--) if (number.slice(-k) === draw.number.slice(-k)) return `${8 - k}등`;
+  return null;
+}
+function tailMatch(number, target) {
+  let k = 0;
+  while (k < 6 && number[5 - k] === target[5 - k]) k++;
+  return k;
+}
+
+async function openDetail(d) {
+  let draws;
+  try { draws = await loadDraws(); } catch (e) { toast(apiMessage(e)); return; }
+  const draw = d.pension ? draws.pension[d.round] : draws.lotto[d.round];
+  const status = d.result === "미추첨" || !draw ? '<span class="pill warn">추첨 전</span>'
+    : d.prize > 0 ? `<span class="pill good">${d.rank ? `${esc(d.rank)}등 · ` : ""}${won(d.prize)}</span>` : '<span class="pill mute">낙첨</span>';
+
+  let body = `<dl class="facts">
+      <div><dt>구입일</dt><dd>${esc(fmtWhen(d.date, false))}</dd></div>
+      <div><dt>추첨일</dt><dd>${draw ? esc(fmtWhen(draw.date, false)) : "추첨 전"}</dd></div>
+      <div><dt>구매</dt><dd>${esc(d.qty)}${d.pension ? "매" : "게임"} · ${won(d.qty * 1000)}</dd></div>
+      <div><dt>당첨금</dt><dd>${draw ? won(d.prize) : "–"}</dd></div>
+    </dl>`;
+
+  if (!d.pension) {
+    if (draw) {
+      body += `<div><div class="sec-title">${esc(d.round)}회 당첨번호</div><div class="win-row">${balls(draw.numbers)}<span class="plus">+</span>${balls([draw.bonus])}</div></div>`;
+    }
+    body += `<div><div class="sec-title">내 번호</div>`;
+    if (!d.games.length) body += `<p class="empty">번호 정보를 아직 받지 못했어요. 다음 자동 실행(또는 홈의 '모의 실행') 때 받아와요.</p>`;
+    d.games.forEach((g) => {
+      const nums = g.numbers || [];
+      const rank = draw && nums.length ? lottoRankOf(nums, draw) : null;
+      const ballsHtml = nums.length ? `<div class="balls">${nums.map((n) => {
+        const cls = !draw ? "" : draw.numbers.includes(n) ? "" : n === draw.bonus && rank === "2등" ? " bonus-hit" : " miss";
+        return `<span class="ball${cls}" style="--ball:${ballColor(n)}">${n}</span>`;
+      }).join("")}</div>` : '<span class="muted">자동번호 (번호 확인 전)</span>';
+      const hits = draw && nums.length ? nums.filter((n) => draw.numbers.includes(n)).length : null;
+      body += `<div class="line"><span class="slot">${esc(g.slot)}<span class="mode">${esc(g.mode || "")}</span></span>${ballsHtml}${
+        !draw ? '<span class="pill warn">추첨 전</span>' : rank ? `<span class="pill good">${esc(rank)}</span>` : `<span class="pill mute">${hits}개</span>`}</div>`;
+    });
+    body += `</div>`;
+  } else {
+    if (draw) {
+      body += `<div><div class="sec-title">${esc(d.round)}회 당첨번호</div><div class="win-row"><span class="jo">${esc(draw.group)}조</span>${digits(draw.number)}</div>
+        <div class="hint" style="margin-top:6px">보너스 ${esc(draw.bonus)} (조 상관없이 6자리 일치)</div></div>`;
+    }
+    body += `<div><div class="sec-title">내 번호</div>`;
+    if (!d.tickets.length) body += `<p class="empty">번호 정보가 없어요.</p>`;
+    d.tickets.forEach((t) => {
+      const where = t.groups.join(",") === "1,2,3,4,5" ? "1~5조" : t.groups.map((g) => `${g}조`).join(" ");
+      const k = draw ? tailMatch(t.number, draw.number) : 0;
+      const best = draw ? t.groups.map((g) => pensionRankOf(g, t.number, draw)).filter(Boolean).sort()[0] : null;
+      const digitHtml = `<div class="balls">${[...t.number].map((c, i) => `<span class="digit${draw && i >= 6 - k ? " hit" : ""}">${esc(c)}</span>`).join("")}</div>`;
+      body += `<div class="line" style="grid-template-columns:1fr auto"><div class="balls" style="flex-wrap:nowrap"><span class="jo">${esc(where)}</span>${digitHtml}</div>${
+        !draw ? '<span class="pill warn">추첨 전</span>' : best ? `<span class="pill good">${esc(best)}</span>` : '<span class="pill mute">낙첨</span>'}</div>`;
+    });
+    if (draw) body += `<p class="hint" style="margin:6px 0 0">연금복권은 끝자리부터 맞은 개수로 등수가 정해져요 (1자리 7등 … 5자리 3등, 6자리+조 1등).</p>`;
+    body += `</div>`;
+  }
+  if (d.research) body += researchHtml(d.research, d.pension);
+
+  const bg = document.createElement("div");
+  bg.className = "sheet-bg";
+  bg.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(d.game)} ${esc(d.round)}회 상세">
+    <div class="sheet-head"><h3>${esc(d.game)} ${esc(d.round)}회</h3>${status}</div>
+    ${body}
+    <button class="btn primary grow" data-close>닫기</button>
+  </div>`;
+  document.body.append(bg);
+  const close = () => { bg.remove(); document.removeEventListener("keydown", onKey); window.removeEventListener("popstate", close); };
+  const onKey = (ev) => { if (ev.key === "Escape") { history.back(); } };
+  bg.addEventListener("click", (ev) => { if (ev.target === bg || ev.target.hasAttribute("data-close")) history.back(); });
+  document.addEventListener("keydown", onKey);
+  history.pushState({ sheet: 1 }, "");  // 폰 '뒤로' 버튼으로 닫히게
+  window.addEventListener("popstate", close);
+}
+
+function researchHtml(r, pension) {
+  if (!r) return "";
+  let html = `<div><div class="sec-title">번호를 이렇게 고른 이유</div><p class="hint" style="margin:0 0 6px">${esc(r.summary || "")}</p>`;
+  if (!pension && r.tickets?.length) {
+    html += `<div class="table-wrap"><table><thead><tr><th>게임</th><th class="r">인기도</th><th class="r">1등 시 예상 몫</th></tr></thead><tbody>
+      ${r.tickets.map((t) => `<tr><td>${esc(t.slot)}</td><td class="r">${t.popularity.toFixed(2)}배</td><td class="r">${t.first_prize_multiplier.toFixed(2)}배</td></tr>`).join("")}
+      </tbody></table></div><p class="hint" style="margin:6px 0 0">인기도 1.00 = 평균 조합. 낮을수록 남들이 덜 고른 조합이라 1~3등이 되면 나눠 갖는 사람이 적어요. 당첨 확률 자체는 모든 조합이 같아요.</p>`;
+  }
+  return html + `</div>`;
+}
+
+function researchCards() {
+  const R = S.data.research;
+  if (!R) return `<section class="card"><h2>번호 선택 연구</h2><p class="empty">아직 분석 결과가 없어요. 다음 자동 실행(또는 홈의 '모의 실행') 뒤에 표시돼요.</p></section>`;
+  let html = "";
+  const M = R.model;
+  if (M) {
+    html += `<section class="card"><h2>이번 주 번호 선택 <small>${esc(fmtWhen(M.fitted_at))} 분석</small></h2>
+      <p style="margin:0 0 10px;color:var(--ink-2)">${esc(M.summary)}</p>
+      <div class="tiles">
+        <div class="tile"><div class="k">겹치지 않은 숫자</div><div class="v num">${esc(M.distinct_numbers)}개</div><div class="s">5게임 기준 · 많을수록 이번 주 당첨 기회 ↑</div></div>
+        <div class="tile"><div class="k">인기도 모델 검증</div><div class="v num">${Math.round((1 - M.validation.low_vs_high) * 100)}%</div><div class="s">비인기로 본 조합의 실제 공동 당첨자 감소 (최근 ${esc(M.validation.holdout_draws)}회)</div></div>
+      </div>
+      <div class="sec-title" style="margin-top:12px">사람들이 많이 고르는 번호 (피함)</div>
+      <div class="balls">${M.popular_numbers.map(([n]) => `<span class="ball" style="--ball:${ballColor(n)}">${n}</span>`).join("")}</div>
+      <div class="sec-title" style="margin-top:10px">사람들이 덜 고르는 번호</div>
+      <div class="balls">${M.unpopular_numbers.map(([n]) => `<span class="ball" style="--ball:${ballColor(n)}">${n}</span>`).join("")}</div>
+    </section>`;
+  }
+  const block = (title, part) => {
+    const P = R[part];
+    if (!P) return "";
+    const adopted = P.adopted.length;
+    return `<section class="card"><h2>${title} <small>${adopted ? `${adopted}개 채택` : "채택된 가설 없음"} · ${esc(fmtWhen(R.generated_at))}</small></h2>
+      <p class="hint" style="margin:0 0 8px">${part === "lotto" ? `매 회차 '그 회차 이전 데이터만' 보고 골랐을 때 실제로 더 맞았는지 ${esc(P.backtest_draws)}회로 검증했어요.` : "연금복권 이력 전체로 검증했어요."} 효과가 확인된 가설만 번호 선택에 자동 반영돼요.</p>
+      <div class="list">${P.tests.map((t) => `<details class="row" style="display:block">
+        <summary style="display:flex;justify-content:space-between;gap:10px;cursor:pointer;list-style:none">
+          <span class="t">${esc(t.name)}</span>
+          <span class="pill ${t.verdict === "채택" ? "good" : t.verdict === "기각" ? "mute" : "warn"}">${esc(t.verdict)}</span>
+        </summary>
+        <div class="d" style="margin-top:6px">가설: ${esc(t.claim)}</div>
+        <div class="d">방법: ${esc(t.method)}</div>
+        <div class="d" style="color:var(--ink-2)">결과: ${esc(t.result)}</div>
+        <div class="d" style="color:var(--ink-2)">${esc(t.why)}</div>
+      </details>`).join("")}</div>
+    </section>`;
+  };
+  html += block("로또 당첨 가설 검증", "lotto") + block("연금복권 당첨 가설 검증", "pension");
+  return html;
 }
 
 /* ───────────── 분석 ───────────── */
@@ -469,7 +664,7 @@ function renderStats(view) {
     ranks[k].n += 1; ranks[k].sum += e.prize;
   });
 
-  let html = `<div class="chips" role="group" aria-label="기간">
+  let html = researchCards() + `<div class="eyebrow" style="margin-top:6px">내 구매 수익률</div><div class="chips" role="group" aria-label="기간">
     ${[["all", "전체 기간"], ["12m", "최근 12개월"], ["year", "올해"]].map(([k, l]) => `<button class="chip" data-period="${k}" aria-pressed="${S.stats.period === k}">${l}</button>`).join("")}
   </div>`;
 
@@ -794,18 +989,43 @@ function demoData() {
   const monday = new Date(now); monday.setHours(7, 20, 0, 0); monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
   const weeks = 40, lottoNow = 1244, pensionNow = 335;
   const ledger = [], purchases = [], balances = [], notifications = [];
+  const draws = { lotto: {}, pension: {} };
+  const hitsOf = (nums, drawNums) => nums.filter((n) => drawNums.includes(n)).length;
+  const game = (drawNums, bonus, want) => {  // want 개만 맞는 게임 (want 없으면 2개 이하)
+    for (;;) {
+      let nums;
+      if (want) {
+        const hit = [...drawNums].sort(() => rnd() - 0.5).slice(0, want);
+        const rest = new Set(hit);
+        while (rest.size < 6) { const n = 1 + Math.floor(rnd() * 45); if (!drawNums.includes(n) && n !== bonus) rest.add(n); }
+        nums = [...rest].sort((a, b) => a - b);
+      } else nums = pick6();
+      if (want || hitsOf(nums, drawNums) <= 2) return nums;
+    }
+  };
   let bal = 20000;
   for (let i = weeks - 1; i >= 0; i--) {
     const d = new Date(monday); d.setDate(d.getDate() - i * 7);
+    const sat = new Date(d); sat.setDate(sat.getDate() + 5);
+    const thu = new Date(d); thu.setDate(thu.getDate() + 3);
     const lr = lottoNow - i, pr = pensionNow - i, last = i === 0;
+    const drawNums = pick6();
+    let bonus; do { bonus = 1 + Math.floor(rnd() * 45); } while (drawNums.includes(bonus));
     const lottoWin = last ? 0 : rnd() < 0.09 ? (rnd() < 0.12 ? 50000 : 5000) : 0;
-    ledger.push({ key: `l${i}`, date: day(d), game: "로또6/45", code: "LO40", round: lr, qty: 5, result: last ? "미추첨" : lottoWin ? "당첨" : "낙첨", rank: lottoWin === 50000 ? 4 : lottoWin ? 5 : null, prize: lottoWin, draw_date: "", info: "" });
+    const games = Array.from({ length: 5 }, (_, k) => ({ slot: "ABCDE"[k], numbers: game(drawNums, bonus, k === 0 && lottoWin ? (lottoWin === 50000 ? 4 : 3) : 0), mode: "자동" }));
+    if (!last) draws.lotto[lr] = { round: lr, date: day(sat), numbers: drawNums, bonus };
+    ledger.push({ key: `l${i}`, date: day(d), game: "로또6/45", code: "LO40", round: lr, qty: 5, result: last ? "미추첨" : lottoWin ? "당첨" : "낙첨", rank: lottoWin === 50000 ? 4 : lottoWin ? 5 : null, prize: lottoWin, draw_date: "", info: "", games });
+
     const pnum = String(Math.floor(rnd() * 1e6)).padStart(6, "0");
     const pw = last ? 0 : rnd() < 0.1 ? 1000 : rnd() < 0.012 ? 5000 : 0;
+    const keep = pw === 5000 ? 2 : pw === 1000 ? 1 : 0;  // 끝에서 몇 자리 맞출지
+    let wnum = String(Math.floor(rnd() * 1e6)).padStart(6, "0").split("");
+    for (let k = 0; k < keep; k++) wnum[5 - k] = pnum[5 - k];
+    if (wnum[5 - keep] === pnum[5 - keep]) wnum[5 - keep] = String((+pnum[5 - keep] + 1) % 10);
+    if (!last) draws.pension[pr] = { round: pr, date: day(thu), group: 1 + Math.floor(rnd() * 5), number: wnum.join(""), bonus: String(Math.floor(rnd() * 1e6)).padStart(6, "0") };
     for (let g = 1; g <= 5; g++) ledger.push({ key: `p${i}${g}`, date: day(d), game: "연금복권720+", code: "LP72", round: pr, qty: 1, result: last ? "미추첨" : pw ? "당첨" : "낙첨", rank: pw === 1000 ? 7 : pw ? 6 : null, prize: pw, draw_date: "", info: `${g}:${pnum}` });
     if (i < 10) {
-      const tickets = Array.from({ length: 5 }, (_, k) => ({ slot: "ABCDE"[k], numbers: pick6(), mode: "수동" }));
-      purchases.push({ game: "lotto645", round: lr, bought_at: iso(d, 9, 19), tickets, result: last ? null : tickets.map((_, k) => (k === 0 && lottoWin ? (lottoWin === 50000 ? "4등 (5만원)" : "5등 (5천원)") : "낙첨")) });
+      purchases.push({ game: "lotto645", round: lr, bought_at: iso(d, 9, 19), tickets: games.map((g) => ({ ...g, mode: "수동" })), result: last ? null : games.map((g) => (lottoRankOf(g.numbers, draws.lotto[lr]) || "낙첨")) });
       purchases.push({ game: "pension720", round: pr, bought_at: iso(d, 9, 20), tickets: [1, 2, 3, 4, 5].map((g) => ({ group: g, number: pnum })), result: last ? null : Array(5).fill(pw === 1000 ? "7등 (1천원)" : pw ? "6등 (5천원)" : "낙첨") });
     }
     bal = bal - 10000 + lottoWin + pw * 5;
@@ -838,7 +1058,7 @@ function demoData() {
       },
       balance: { at: iso(monday, 7, 20), balance: 3000 },
     },
-    ledger, purchases, balances, notifications,
+    ledger, purchases, balances, notifications, draws,
     logFiles: [`${monday.getFullYear()}-${pad(monday.getMonth() + 1)}.log`], logText,
     runs: [
       { run_number: 48, event: "schedule", status: "completed", conclusion: "success", created_at: iso(monday, 7, 17), html_url: "" },
