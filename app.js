@@ -8,6 +8,7 @@
  */
 
 const STORE_KEY = "lotto-app";
+const CHARGE_URL = "https://www.dhlottery.co.kr/mypage/mndpChrg";
 const WEEKDAYS = "일월화수목금토";
 const params = new URLSearchParams(location.search);
 const MODE = params.has("demo") ? "demo" : params.has("local") ? "local" : "live";
@@ -267,12 +268,20 @@ function userStatus(st) {
   switch (st.kind) {
     case "done":
       return { title: "이번 주 구매 완료", lines: [`다음 자동 구매 ${st.next_try_text}`] };
-    case "charge":
-      return { title: "예치금 충전이 필요해요", charge: true,
-        lines: [`예치금 ${won(s?.balance)} · 이번 주 필요 ${won(s?.need)}`, `충전하면 자동으로 구매해요 (다음 확인 ${st.next_try_text})`] };
+    case "charge": {
+      const short = Math.max(0, (s?.need || 0) - (s?.balance || 0));
+      const extra = (s?.amount || 0) - short;
+      return { title: "예치금 충전이 필요해요", charge: true, lines: [
+        `예치금 ${won(s?.balance)} · 이번 주 필요 ${won(s?.need)} · 부족한 금액 ${won(short)}`,
+        `${won(s?.amount)} 충전하면 자동으로 구매해요`
+          + (extra > 0 ? ` (동행복권 충전이 5,000원 단위라 ${won(extra)}은 다음 주에 써요)` : ""),
+        `다음 확인 ${st.next_try_text}`,
+      ] };
+    }
     case "gave_up":
       return { title: "이번 주는 구매하지 못했어요", charge: true,
-        lines: ["금요일까지 충전이 확인되지 않았어요", "지금 충전하면 바로 구매할 수 있어요"] };
+        lines: [`예치금 ${won(s?.balance)} · 필요 ${won(s?.need)}`, "금요일까지 충전이 확인되지 않았어요",
+          `지금 ${won(s?.amount)} 충전하고 아래 버튼을 누르면 바로 구매해요`] };
     case "blocked":
       return { title: "로그인 정보를 확인해 주세요", lines: ["동행복권 로그인에 실패해서 이번 주 자동 구매를 멈췄어요", "설정 › 관리자 › 실행 관리에서 확인하세요"] };
     default:
@@ -328,10 +337,18 @@ function renderHome(view) {
     html += `<section class="card"><h2>이번 주 자동 구매</h2><p class="empty">첫 자동 구매(월요일 07:17) 뒤에 표시돼요.</p></section>`;
   }
 
+  const weeklyNeed = st?.weekly_need || 10000;
+  const nextShort = bal ? Math.max(0, weeklyNeed - bal.balance) : 0;
   html += `<div class="tiles">
-    <div class="tile"><div class="k">예치금</div><div class="v num">${bal ? won(bal.balance) : "–"}</div><div class="s">${bal ? `${esc(fmtWhen(bal.at))} 기준` : "기록 없음"}</div></div>
-    <div class="tile"><div class="k">매주 자동 구매</div><div class="v" style="font-size:17px;margin-top:6px">월요일 오전</div><div class="s">로또 5게임 · 연금 1~5조 (1만원)</div></div>
+    <div class="tile"><div class="k">예치금</div><div class="v num">${bal ? won(bal.balance) : "–"}</div>
+      <div class="s">${bal ? (nextShort && st?.kind === "done" ? `다음 주 구매까지 ${won(nextShort)} 부족` : `${esc(fmtWhen(bal.at))} 기준`) : "기록 없음"}</div></div>
+    <div class="tile"><div class="k">매주 자동 구매</div><div class="v" style="font-size:17px;margin-top:6px">월요일 오전</div><div class="s">로또 5게임 · 연금 1~5조 (${won(weeklyNeed)})</div></div>
   </div>`;
+  if (nextShort && st?.kind === "done") {
+    html += `<section class="card"><h2>다음 주 준비</h2>
+      <p style="margin:0 0 10px;color:var(--ink-2)">미리 충전해두면 다음 주에는 알림 없이 바로 구매해요. 넉넉히 충전해두면 여러 주 동안 그냥 돌아가요.</p>
+      <a class="btn grow" href="${esc(st.charge_url)}" target="_blank" rel="noopener">지금 충전해두기</a></section>`;
+  }
 
   const mine = thisWeekTickets();
   html += `<section class="card"><h2>이번 주 내 번호</h2>`;
@@ -1051,6 +1068,14 @@ function renderSettings(view) {
       <div class="row"><div class="t">구매 시간</div><span class="d">월요일 07:17 · 못 사면 금요일까지 재시도</span></div>
       <div class="row"><div class="t">예치금이 부족하면</div><span class="d">부족한 만큼 충전 요청 알림</span></div>
     </div></section>
+
+    <section class="card"><h2>예치금 충전</h2>
+      <p class="hint" style="margin:0 0 8px">알림의 [충전하기]를 누르면 동행복권 충전 화면이 열려요. 동행복권 정책상 충전은 본인이 로그인해서 비밀번호를 입력해야 해요.</p>
+      <ul style="margin:0 0 10px;padding-left:18px;display:grid;gap:6px;color:var(--ink-2)">
+        <li><b>한 번에 넉넉히</b> — 5만원 충전하면 5주, 10만원이면 10주 동안 충전 없이 자동 구매돼요.</li>
+        <li><b>은행 자동이체</b> — 동행복권 전용 가상계좌로 매달 자동이체를 걸어두면 충전도 자동이 돼요. 계좌번호는 동행복권 마이페이지 › 예치금 충전 › 가상계좌에서 확인할 수 있어요.</li>
+      </ul>
+      <a class="btn grow" href="${esc(CHARGE_URL)}" target="_blank" rel="noopener">충전하기</a></section>
 
     ${MODE === "live" ? `<section class="card"><h2>보안</h2>
       <p class="hint" style="margin:0 0 6px">${cfg.sealed ? "연결 정보는 PIN 으로 암호화되어 이 기기에만 저장돼 있어요." : "연결 정보가 암호화 없이 저장돼 있어요. PIN 을 설정하면 더 안전해요."}</p>
