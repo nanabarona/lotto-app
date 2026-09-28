@@ -131,11 +131,12 @@ const source = {
     const r = await this.gh("/actions/workflows/weekly.yml/runs?per_page=8", { headers: { Accept: "application/vnd.github+json" } });
     return (await r.json()).workflow_runs || [];
   },
-  async dispatch(dryRun) {
-    await this.gh("/actions/workflows/weekly.yml/dispatches", {
+  async dispatch(dryRun, workflow = "weekly.yml") {
+    const body = workflow === "weekly.yml" ? { ref: "main", inputs: { dry_run: dryRun ? "true" : "false" } } : { ref: "main" };
+    await this.gh(`/actions/workflows/${workflow}/dispatches`, {
       method: "POST",
       headers: { Accept: "application/vnd.github+json", "Content-Type": "application/json" },
-      body: JSON.stringify({ ref: "main", inputs: { dry_run: dryRun ? "true" : "false" } }),
+      body: JSON.stringify(body),
     });
   },
   async check() { await this.gh("", { headers: { Accept: "application/vnd.github+json" } }); },
@@ -385,7 +386,9 @@ function renderRuns(view) {
     <div class="actions" style="margin-top:0">
       <button class="btn primary grow" data-run="dry">모의 실행</button>
       <button class="btn grow" data-run="real">지금 구매 시도</button>
-    </div></section>`;
+      <button class="btn grow" id="run-results">결과 확인 실행</button>
+    </div>
+    <p class="hint" style="margin:10px 0 0">결과 확인은 추첨 뒤(연금 목 19:30~, 로또 토 21:30~)에 자동으로도 돌아가요.</p></section>`;
   html += `<section class="card"><h2>실행 기록 <small>GitHub Actions</small></h2>`;
   if (S.runsError) html += `<p class="empty">${esc(S.runsError)}</p>`;
   else if (!S.runs.length) html += `<p class="empty">실행 기록이 없어요.</p>`;
@@ -411,6 +414,7 @@ function renderRuns(view) {
   }
   view.innerHTML = html;
   view.querySelectorAll("[data-run]").forEach((b) => b.addEventListener("click", () => runWorkflow(b.dataset.run === "dry")));
+  view.querySelector("#run-results")?.addEventListener("click", runResults);
 }
 
 
@@ -423,6 +427,16 @@ async function runWorkflow(dry) {
     await source.dispatch(dry);
     toast("실행을 요청했어요. 2~3분 뒤 결과가 반영돼요.");
     pollRuns();
+  } catch (e) { toast(apiMessage(e, true)); }
+}
+
+async function runResults() {
+  if (!confirm("지금 당첨 결과를 확인할까요? (구매는 하지 않아요)")) return;
+  if (MODE !== "live") { toast("데모에서는 실제로 실행되지 않아요."); return; }
+  try {
+    await source.dispatch(false, "results.yml");
+    toast("결과 확인을 요청했어요. 2~3분 뒤 반영돼요.");
+    setTimeout(loadAll, 150000);
   } catch (e) { toast(apiMessage(e, true)); }
 }
 
