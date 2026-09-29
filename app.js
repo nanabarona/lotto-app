@@ -188,7 +188,66 @@ async function loadAll() {
     $("#btn-refresh").classList.remove("spin");
   }
   render();
+  watchFresh();
 }
+
+/* ───── 자동 갱신 ───── */
+// 구매·당첨 기록이 올라오면 앱을 열어 둔 채로도 바로 보이도록, 요약 파일 하나만 가볍게 확인한다.
+const FRESH = { timer: null, busy: false };
+
+async function checkFresh() {
+  if (FRESH.busy || S.loading || MODE === "demo" || document.visibilityState !== "visible") return;
+  FRESH.busy = true;
+  try {
+    const app = await source.json("data/app.json", null);
+    if (app && app.generated_at !== S.data?.app?.generated_at) await loadAll();
+  } catch { /* 잠깐 끊긴 것뿐이니 다음 차례에 */ }
+  finally { FRESH.busy = false; }
+}
+
+// 화면을 아래로 당겼다 놓으면 데이터만 다시 읽는다. (브라우저 기본 동작은 앱을 처음부터 다시 띄워 PIN 을 다시 묻는다)
+function setupPull() {
+  const el = $("#pull");
+  let start = null, dist = 0;
+  const rest = (spinning) => {
+    el.classList.add("back");
+    el.classList.toggle("spin", spinning);
+    el.classList.toggle("on", spinning);
+    el.style.transform = spinning ? "translate(-50%, 14px)" : "translate(-50%, -100%)";
+  };
+  addEventListener("touchstart", (e) => {
+    const top = (document.scrollingElement || document.documentElement).scrollTop <= 0;
+    start = (e.touches.length === 1 && top && S.data && !$("#top").hidden && !S.loading) ? e.touches[0].clientY : null;
+    dist = 0;
+    if (start !== null) el.classList.remove("back");
+  }, { passive: true });
+  addEventListener("touchmove", (e) => {
+    if (start === null) return;
+    dist = e.touches[0].clientY - start;
+    if (dist <= 0) { el.classList.remove("on"); return; }
+    el.style.transform = `translate(-50%, ${Math.min(dist * 0.45, 64) - 36}px) rotate(${Math.min(dist * 1.6, 360)}deg)`;
+    el.classList.toggle("on", dist > 16);
+  }, { passive: true });
+  addEventListener("touchend", () => {
+    if (start === null) return;
+    const pulled = dist > 70;
+    start = null; dist = 0;
+    if (!pulled) { rest(false); return; }
+    rest(true);
+    S.logs.text = "";
+    loadAll().finally(() => rest(false));
+  }, { passive: true });
+}
+
+function watchFresh() {
+  clearInterval(FRESH.timer);
+  if (MODE === "demo") return;
+  FRESH.timer = setInterval(() => {
+    if (S.loadedAt) $("#sync").textContent = `업데이트 ${ago(S.loadedAt)}`;
+    checkFresh();
+  }, 30000);
+}
+
 
 /* ───────────── 렌더링 공통 ───────────── */
 const TABS = ["home", "history", "stats", "settings"];
@@ -486,8 +545,7 @@ async function runResults() {
   if (MODE !== "live") { toast("데모에서는 실제로 실행되지 않아요."); return; }
   try {
     await source.dispatch(false, "results.yml");
-    toast("결과 확인을 요청했어요. 2~3분 뒤 반영돼요.");
-    setTimeout(loadAll, 150000);
+    toast("결과 확인을 요청했어요. 끝나는 대로 자동으로 반영돼요.");
   } catch (e) { toast(apiMessage(e, true)); }
 }
 
@@ -1100,13 +1158,14 @@ function showPin() {
     try {
       source.repo = cfg.repo;
       source.token = await openToken(cfg.sealed, input.value.trim());
+      try { sessionStorage.setItem("tok", source.token); } catch { /* 사사모드 등 */ }
       showApp();
       loadAll();
     } catch { g.querySelector("#p-err").textContent = "PIN 이 맞지 않아요."; input.value = ""; }
   };
   g.querySelector("#p-go").addEventListener("click", go);
   input.addEventListener("keyup", (e) => { if (e.key === "Enter" || input.value.length === 8) go(); });
-  g.querySelector("#p-reset").addEventListener("click", () => { if (confirm("이 폰에 저장된 연결 정보를 지우고 다시 연결할까요?")) { store.clear(); showSetup(); } });
+  g.querySelector("#p-reset").addEventListener("click", () => { if (confirm("이 폰에 저장된 연결 정보를 지우고 다시 연결할까요?")) { store.clear(); try { sessionStorage.removeItem("tok"); } catch { /* 사사모드 등 */ } showSetup(); } });
 }
 
 function menuRow({ id, sub, title, desc, danger }) {
@@ -1190,7 +1249,8 @@ function renderSettings(view) {
     try { await navigator.clipboard.writeText(demoUrl); toast("데모 링크를 복사했어요."); } catch { prompt("아래 링크를 복사하세요", demoUrl); }
   });
   view.querySelector("#s-pin")?.addEventListener("click", () => showSetup());
-  view.querySelector("#s-lock")?.addEventListener("click", () => { source.token = ""; S.data = null; store.get().sealed ? showPin() : showSetup(); });
+  view.querySelector("#s-lock")?.addEventListener("click", () => { source.token = ""; S.data = null;
+    try { sessionStorage.removeItem("tok"); } catch { /* 사사모드 등 */ } store.get().sealed ? showPin() : showSetup(); });
   view.querySelector("#s-out")?.addEventListener("click", () => {
     if (!confirm("이 기기에서 연결 정보를 지울까요? (GitHub 의 토큰 자체는 GitHub 설정에서 삭제하세요)")) return;
     store.clear(); source.token = ""; S.data = null; showSetup();
@@ -1304,15 +1364,24 @@ function boot() {
   let resizeTimer;
   window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (S.tab === "stats") render(); }, 200); });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && S.data && MODE === "live" && Date.now() - (S.loadedAt || 0) > 5 * 60000) loadAll();
+    if (document.visibilityState !== "visible") { clearInterval(FRESH.timer); return; }
+    watchFresh();
+    if (!S.data || MODE === "demo") return;
+    if (Date.now() - (S.loadedAt || 0) > 60000) loadAll(); else checkFresh();
   });
+  // 홈 화면 앱을 다시 열 때 브라우저가 멈췄던 화면을 그대로 되살리는 경우
+  window.addEventListener("pageshow", (e) => { if (e.persisted && S.data && MODE !== "demo") loadAll(); });
+  setupPull();
   const saved = store.get().tab;
   if (TABS.includes(saved)) S.tab = saved;
   if (MODE === "demo") $("#demo-bar").hidden = false;
 
   if (MODE !== "live") { showApp(); loadAll(); return; }
   const cfg = store.get();
-  if (cfg.repo && cfg.sealed) showPin();
+  let opened = "";
+  try { opened = sessionStorage.getItem("tok") || ""; } catch { /* 사사모드 등 */ }
+  if (cfg.repo && cfg.sealed && opened) { source.repo = cfg.repo; source.token = opened; showApp(); loadAll(); }
+  else if (cfg.repo && cfg.sealed) showPin();
   else if (cfg.repo && cfg.token) { source.repo = cfg.repo; source.token = cfg.token; showApp(); loadAll(); }
   else showSetup();
 }
