@@ -192,6 +192,19 @@ main { max-width: 560px; margin: 0 auto; padding: 16px 16px calc(env(safe-area-i
 .notice .links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; align-self: center; }
 
+/* 충전 방법 고르기 */
+.ways { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.way {
+  appearance: none; text-align: left; cursor: pointer; border: 1.5px solid var(--line); background: var(--surface);
+  border-radius: 12px; padding: 10px 12px; display: grid; gap: 2px;
+}
+.way b { font-size: 14px; font-weight: 700; }
+.way small { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.way[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.way[aria-pressed="true"] b { color: var(--accent); }
+.way:disabled { opacity: .55; cursor: default; }
+.way:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { border: 1px solid var(--line); background: var(--surface); padding: 6px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer; }
 .chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }

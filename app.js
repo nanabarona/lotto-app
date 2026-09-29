@@ -263,17 +263,42 @@ function rankPill(rank, prize) {
 }
 
 /* ───────────── 홈 ───────────── */
-/** 로그인 없이 입금으로 충전하는 안내 (전용 가상계좌). */
-function vaccountCard(va, amount) {
-  return `<section class="card"><h2>로그인 없이 충전하기</h2>
-    <p style="margin:0 0 10px;color:var(--ink-2)">아래 계좌로 ${amount ? `<b>${won(amount)}</b>을 ` : ""}입금하면 예치금이 자동으로 채워져요. 동행복권 로그인이 필요 없어요.</p>
-    <div class="tile"><div class="k">${esc(va.bank)} · 내 전용 계좌</div>
-      <div class="v num" style="font-size:21px">${esc(va.display || va.number)}</div>
-      ${va.holder ? `<div class="s">예금주 ${esc(va.holder)}</div>` : ""}</div>
-    <div class="actions">
-      <button class="btn primary grow" data-copy="${esc(va.number)}">계좌번호 복사</button>
+const u_charge = (st) => st && (st.kind === "charge" || st.kind === "gave_up");
+
+/** 충전 방법 고르기: 가상계좌 입금(로그인 없음) 또는 동행복권 로그인 충전. */
+function chargeWay(va) {
+  const saved = store.get().chargeWay;
+  if (saved === "va" && !va) return "site";
+  return saved === "site" || saved === "va" ? saved : (va ? "va" : "site");
+}
+
+function chargeCard(st, va) {
+  const way = chargeWay(va);
+  const amount = st.shortfall?.amount;
+  const pick = (k, title, sub, on) => `<button class="way" data-way="${k}" aria-pressed="${on}" ${!va && k === "va" ? "disabled" : ""}>
+      <b>${title}</b><small>${sub}</small></button>`;
+  let body;
+  if (way === "va" && va) {
+    body = `<p style="margin:0 0 10px;color:var(--ink-2)">아래 계좌로 ${amount ? `<b>${won(amount)}</b>을 ` : ""}입금하면 예치금이 자동으로 채워져요. 동행복권 로그인이 필요 없어요.</p>
+      <div class="tile"><div class="k">${esc(va.bank)} · 내 전용 계좌</div>
+        <div class="v num" style="font-size:21px">${esc(va.display || va.number)}</div>
+        ${va.holder ? `<div class="s">예금주 ${esc(va.holder)}</div>` : ""}</div>
+      <div class="actions"><button class="btn primary grow" data-copy="${esc(va.number)}">계좌번호 복사</button></div>
+      <p class="hint" style="margin:10px 0 0">은행 앱에서 이 계좌로 <b>자동이체</b>를 걸어두면 충전까지 자동이 돼요 (예: 매달 4만원 = 4주치).</p>`;
+  } else {
+    body = `<p style="margin:0 0 10px;color:var(--ink-2)">동행복권 충전 화면에서 ${amount ? `<b>${won(amount)}</b>을 ` : ""}충전해요. 동행복권 정책상 로그인과 간편충전 비밀번호가 필요해요.</p>
+      <div class="actions" style="margin-top:0"><a class="btn primary grow" href="${esc(st.charge_url || CHARGE_URL)}" target="_blank" rel="noopener">동행복권 충전 화면 열기</a></div>
+      ${va ? "" : '<p class="hint" style="margin:10px 0 0">내 전용 가상계좌는 다음 자동 실행 때 찾아서 여기에 표시해요. 그때부터는 로그인 없이 입금만으로 충전할 수 있어요.</p>'}`;
+  }
+  return `<section class="card"><h2>충전 방법</h2>
+    <div class="ways">
+      ${pick("va", "가상계좌 입금", va ? "로그인 없음 · 자동이체 가능" : "다음 실행 때 계좌 표시", way === "va")}
+      ${pick("site", "동행복권 충전", "로그인 + 비밀번호", way === "site")}
     </div>
-    <p class="hint" style="margin:10px 0 0">은행 앱에서 이 계좌로 <b>자동이체</b>를 걸어두면 충전까지 자동이 돼요 (예: 매달 4만원).</p>
+    ${body}
+    <hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
+    <button class="btn grow" data-run="real">충전했어요, 지금 구매</button>
+    <p class="hint" style="margin:8px 0 0">안 눌러도 다음 자동 확인(${esc(st.next_try_text)}) 때 구매해요.</p>
   </section>`;
 }
 
@@ -350,17 +375,13 @@ function renderHome(view) {
         <span class="status-title">${esc(u.title)}</span>
       </div>
       <ul>${u.lines.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>
-      ${u.charge ? `<div class="actions">
-        <a class="btn primary grow" href="${esc(st.charge_url)}" target="_blank" rel="noopener">충전하기${st.shortfall ? ` (${won(st.shortfall.amount)})` : ""}</a>
-        <button class="btn grow" data-run="real">충전했어요, 지금 구매</button>
-      </div>` : ""}
     </section>`;
   } else {
     html += `<section class="card"><h2>이번 주 자동 구매</h2><p class="empty">첫 자동 구매(월요일 07:17) 뒤에 표시돼요.</p></section>`;
   }
 
   const va = app?.virtual_account;
-  if (va && (st?.kind === "charge" || st?.kind === "gave_up")) html += vaccountCard(va, st.shortfall?.amount);
+  if (u_charge(st)) html += chargeCard(st, va);
 
   const weeklyNeed = st?.weekly_need || 10000;
   const nextShort = bal ? Math.max(0, weeklyNeed - bal.balance) : 0;
@@ -372,7 +393,11 @@ function renderHome(view) {
   if (nextShort && st?.kind === "done") {
     html += `<section class="card"><h2>다음 주 준비</h2>
       <p style="margin:0 0 10px;color:var(--ink-2)">미리 충전해두면 다음 주에는 알림 없이 바로 구매해요. 넉넉히 충전해두면 여러 주 동안 그냥 돌아가요.</p>
-      <a class="btn grow" href="${esc(st.charge_url)}" target="_blank" rel="noopener">지금 충전해두기</a></section>`;
+      ${va ? `<div class="tile" style="margin-bottom:10px"><div class="k">${esc(va.bank)} · 내 전용 계좌 (로그인 없이 입금)</div>
+        <div class="v num" style="font-size:20px">${esc(va.display || va.number)}</div></div>
+        <div class="actions" style="margin-top:0"><button class="btn grow" data-copy="${esc(va.number)}">계좌번호 복사</button>
+        <a class="btn grow" href="${esc(st.charge_url || CHARGE_URL)}" target="_blank" rel="noopener">동행복권에서 충전</a></div>`
+        : `<a class="btn grow" href="${esc(st.charge_url || CHARGE_URL)}" target="_blank" rel="noopener">지금 충전해두기</a>`}</section>`;
   }
 
   const mine = thisWeekTickets();
@@ -399,6 +424,7 @@ function renderHome(view) {
   view.innerHTML = html;
 
   view.querySelectorAll("[data-run]").forEach((b) => b.addEventListener("click", () => runWorkflow(false)));
+  view.querySelectorAll("[data-way]").forEach((b) => b.addEventListener("click", () => { store.set({ chargeWay: b.dataset.way }); render(); }));
   bindCopy(view);
   view.querySelectorAll("[data-mine]").forEach((el) => el.addEventListener("click", () => openDetail(mine[+el.dataset.mine].detail())));
   view.querySelectorAll("[data-last]").forEach((el) => el.addEventListener("click", () => openDetail(detailFromLedger(recent[+el.dataset.last]))));
@@ -1110,6 +1136,10 @@ function renderSettings(view) {
     </div></section>
 
     <section class="card"><h2>예치금 충전</h2>
+      <div class="field" style="margin-bottom:12px"><label for="s-way">기본 충전 방법</label><select id="s-way">
+        <option value="va" ${chargeWay(va) === "va" ? "selected" : ""} ${va ? "" : "disabled"}>가상계좌 입금 (로그인 없음)</option>
+        <option value="site" ${chargeWay(va) === "site" ? "selected" : ""}>동행복권에서 충전 (로그인 필요)</option>
+      </select><span class="hint">홈의 충전 카드가 이 방법으로 먼저 열려요.</span></div>
       ${va ? `<p style="margin:0 0 10px;color:var(--ink-2)"><b>로그인 없이 충전하는 방법</b> — 아래 내 전용 계좌로 입금하면 예치금이 자동으로 채워져요.</p>
         <div class="tile"><div class="k">${esc(va.bank)} · 내 전용 계좌</div><div class="v num" style="font-size:20px">${esc(va.display || va.number)}</div>
           ${va.holder ? `<div class="s">예금주 ${esc(va.holder)}</div>` : ""}</div>
@@ -1155,6 +1185,7 @@ function renderSettings(view) {
   view.querySelectorAll("[data-sub]").forEach((b) => b.addEventListener("click", () => openSub(b.dataset.sub)));
   bindCopy(view);
   view.querySelector("#s-theme").addEventListener("change", (e) => { store.set({ theme: e.target.value }); applyTheme(); });
+  view.querySelector("#s-way")?.addEventListener("change", (e) => { store.set({ chargeWay: e.target.value }); toast("기본 충전 방법을 바꿨어요."); });
   view.querySelector("#s-copy").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(demoUrl); toast("데모 링크를 복사했어요."); } catch { prompt("아래 링크를 복사하세요", demoUrl); }
   });
