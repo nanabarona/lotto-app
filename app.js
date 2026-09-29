@@ -263,6 +263,27 @@ function rankPill(rank, prize) {
 }
 
 /* ───────────── 홈 ───────────── */
+/** 로그인 없이 입금으로 충전하는 안내 (전용 가상계좌). */
+function vaccountCard(va, amount) {
+  return `<section class="card"><h2>로그인 없이 충전하기</h2>
+    <p style="margin:0 0 10px;color:var(--ink-2)">아래 계좌로 ${amount ? `<b>${won(amount)}</b>을 ` : ""}입금하면 예치금이 자동으로 채워져요. 동행복권 로그인이 필요 없어요.</p>
+    <div class="tile"><div class="k">${esc(va.bank)} · 내 전용 계좌</div>
+      <div class="v num" style="font-size:21px">${esc(va.display || va.number)}</div>
+      ${va.holder ? `<div class="s">예금주 ${esc(va.holder)}</div>` : ""}</div>
+    <div class="actions">
+      <button class="btn primary grow" data-copy="${esc(va.number)}">계좌번호 복사</button>
+    </div>
+    <p class="hint" style="margin:10px 0 0">은행 앱에서 이 계좌로 <b>자동이체</b>를 걸어두면 충전까지 자동이 돼요 (예: 매달 4만원).</p>
+  </section>`;
+}
+
+function bindCopy(view) {
+  view.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    const text = b.dataset.copy;
+    try { await navigator.clipboard.writeText(text); toast("계좌번호를 복사했어요."); } catch { prompt("계좌번호", text); }
+  }));
+}
+
 /** 사용자에게 보여줄 이번 주 상태 문구 (내부 용어 없이). */
 function userStatus(st) {
   const s = st.shortfall;
@@ -338,6 +359,9 @@ function renderHome(view) {
     html += `<section class="card"><h2>이번 주 자동 구매</h2><p class="empty">첫 자동 구매(월요일 07:17) 뒤에 표시돼요.</p></section>`;
   }
 
+  const va = app?.virtual_account;
+  if (va && (st?.kind === "charge" || st?.kind === "gave_up")) html += vaccountCard(va, st.shortfall?.amount);
+
   const weeklyNeed = st?.weekly_need || 10000;
   const nextShort = bal ? Math.max(0, weeklyNeed - bal.balance) : 0;
   html += `<div class="tiles">
@@ -375,6 +399,7 @@ function renderHome(view) {
   view.innerHTML = html;
 
   view.querySelectorAll("[data-run]").forEach((b) => b.addEventListener("click", () => runWorkflow(false)));
+  bindCopy(view);
   view.querySelectorAll("[data-mine]").forEach((el) => el.addEventListener("click", () => openDetail(mine[+el.dataset.mine].detail())));
   view.querySelectorAll("[data-last]").forEach((el) => el.addEventListener("click", () => openDetail(detailFromLedger(recent[+el.dataset.last]))));
 }
@@ -1067,6 +1092,7 @@ function renderSettings(view) {
   const cfg = store.get();
   const theme = cfg.theme || "system";
   const R = S.data.research;
+  const va = S.data.app?.virtual_account;
   const lastRun = S.runs[0];
   const runDesc = S.runsError ? "권한 확인 필요" : lastRun
     ? `최근 ${lastRun.event === "schedule" ? "자동" : "직접"} 실행 ${fmtWhen(lastRun.created_at)} · ${lastRun.status !== "completed" ? "진행 중" : lastRun.conclusion === "success" ? "완료" : "실패"}`
@@ -1084,12 +1110,14 @@ function renderSettings(view) {
     </div></section>
 
     <section class="card"><h2>예치금 충전</h2>
-      <p class="hint" style="margin:0 0 8px">알림의 [충전하기]를 누르면 동행복권 충전 화면이 열려요. 동행복권 정책상 충전은 본인이 로그인해서 비밀번호를 입력해야 해요.</p>
-      <ul style="margin:0 0 10px;padding-left:18px;display:grid;gap:6px;color:var(--ink-2)">
-        <li><b>한 번에 넉넉히</b> — 5만원 충전하면 5주, 10만원이면 10주 동안 충전 없이 자동 구매돼요.</li>
-        <li><b>은행 자동이체</b> — 동행복권 전용 가상계좌로 매달 자동이체를 걸어두면 충전도 자동이 돼요. 계좌번호는 동행복권 마이페이지 › 예치금 충전 › 가상계좌에서 확인할 수 있어요.</li>
-      </ul>
-      <a class="btn grow" href="${esc(CHARGE_URL)}" target="_blank" rel="noopener">충전하기</a></section>
+      ${va ? `<p style="margin:0 0 10px;color:var(--ink-2)"><b>로그인 없이 충전하는 방법</b> — 아래 내 전용 계좌로 입금하면 예치금이 자동으로 채워져요.</p>
+        <div class="tile"><div class="k">${esc(va.bank)} · 내 전용 계좌</div><div class="v num" style="font-size:20px">${esc(va.display || va.number)}</div>
+          ${va.holder ? `<div class="s">예금주 ${esc(va.holder)}</div>` : ""}</div>
+        <div class="actions"><button class="btn grow" data-copy="${esc(va.number)}">계좌번호 복사</button></div>
+        <p class="hint" style="margin:10px 0 0">은행 앱에서 이 계좌로 자동이체를 걸어두면 충전까지 자동이 돼요 (예: 매달 4만원 = 4주치).</p><hr style="border:0;border-top:1px solid var(--line);margin:12px 0">`
+        : `<p class="hint" style="margin:0 0 8px">내 전용 가상계좌는 다음 자동 실행 때 찾아서 여기에 표시해요. 입금만으로 충전돼서 로그인이 필요 없어요.</p>`}
+      <p class="hint" style="margin:0 0 8px">사이트에서 충전할 때는 동행복권 정책상 직접 로그인해서 비밀번호를 입력해야 해요. 한 번에 넉넉히 충전해두면(5만원 = 5주) 한동안 신경 쓸 일이 없어요.</p>
+      <a class="btn grow" href="${esc(CHARGE_URL)}" target="_blank" rel="noopener">동행복권에서 충전하기</a></section>
 
     ${MODE === "live" ? `<section class="card"><h2>보안</h2>
       <p class="hint" style="margin:0 0 6px">${cfg.sealed ? "연결 정보는 PIN 으로 암호화되어 이 기기에만 저장돼 있어요." : "연결 정보가 암호화 없이 저장돼 있어요. PIN 을 설정하면 더 안전해요."}</p>
@@ -1125,6 +1153,7 @@ function renderSettings(view) {
     <p class="hint" style="text-align:center">복권 수첩 · 데이터 기준 ${esc(fmtWhen(S.data.app?.generated_at) || "–")}</p>`;
 
   view.querySelectorAll("[data-sub]").forEach((b) => b.addEventListener("click", () => openSub(b.dataset.sub)));
+  bindCopy(view);
   view.querySelector("#s-theme").addEventListener("change", (e) => { store.set({ theme: e.target.value }); applyTheme(); });
   view.querySelector("#s-copy").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(demoUrl); toast("데모 링크를 복사했어요."); } catch { prompt("아래 링크를 복사하세요", demoUrl); }
